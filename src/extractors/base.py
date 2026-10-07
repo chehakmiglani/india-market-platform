@@ -3,6 +3,7 @@ import os
 import time
 import logging
 from datetime import date
+from pathlib import Path
 
 import boto3
 import requests
@@ -58,9 +59,19 @@ def bronze_key(source: str, d: date, filename: str) -> str:
 
 
 def write_bronze(source: str, d: date, filename: str, content: bytes, client=None) -> str:
-    """Idempotent: same key is overwritten, so re-running a day never duplicates."""
-    client = client or bronze_client()
+    """Idempotent: same key is overwritten, so re-running a day never duplicates.
+
+    LAKE_BACKEND=local writes to LAKE_ROOT (default data/lake) instead of MinIO,
+    for running without Docker.
+    """
     key = bronze_key(source, d, filename)
+    if client is None and os.getenv("LAKE_BACKEND", "s3") == "local":
+        path = Path(os.getenv("LAKE_ROOT", "data/lake")) / "bronze" / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        log.info("wrote %s (%d bytes)", path, len(content))
+        return key
+    client = client or bronze_client()
     client.put_object(Bucket="bronze", Key=key, Body=content)
     log.info("wrote s3://bronze/%s (%d bytes)", key, len(content))
     return key

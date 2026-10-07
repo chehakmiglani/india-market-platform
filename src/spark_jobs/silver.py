@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-from .parsers import adjustment_factor, parse_navall, parse_nse_date
+from .parsers import adjustment_factor, parse_mfapi, parse_navall, parse_nse_date
 from .session import get_spark, lake_path, local_uri
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -167,6 +167,64 @@ def build_fund_nav(spark: SparkSession, days: list[date] | None) -> int:
     return df.count()
 
 
+def build_fund_nav_history(spark: SparkSession) -> int:
+    """Full NAV history (mfapi) for watchlist funds; kept apart from AMFI's daily file
+    so a history row never overwrites the ISINs AMFI provides. Latest snapshot wins."""
+    dirs = bronze_dirs("mfapi_history", None)
+    if not dirs:
+        return 0
+    latest = Path(dirs[-1].replace("file:///", ""))
+    rows = []
+    for f in latest.glob("*.json"):
+        rows.extend(parse_mfapi(json.loads(f.read_text(encoding="utf-8"))))
+    if not rows:
+        return 0
+    df = (spark.createDataFrame(rows, schema=(
+            "scheme_code long, nav_date date, nav double, scheme_name string, amc string, category string"))
+          .dropDuplicates(["scheme_code", "nav_date"])
+          .withColumn("_ingested_at", F.current_timestamp()))
+    merge_delta(spark, df, "fund_nav_history", ["scheme_code", "nav_date"])
+    return df.count()
+
+
+# ---------- stock_master (reference) ----------
+
+def build_stock_master(spark: SparkSession) -> int:
+    """One row per (snapshot_date, symbol): name, ISIN, face value, listing date, industry.
+    dbt snapshots this into SCD2 dim_stock (renames, face-value splits, re-classification)."""
+    eq_dirs = bronze_dirs("nse_equity_list", None)
+    if not eq_dirs:
+        return 0
+    eq = spark.read.option("header", True).option("ignoreLeadingWhiteSpace", True).csv(eq_dirs)
+    eq = check_schema(eq, ["SYMBOL", "NAME OF COMPANY", "SERIES", "DATE OF LISTING",
+                           "ISIN NUMBER", "FACE VALUE"], "nse_equity_list")
+    eq = eq.select(
+        F.to_date(F.regexp_extract(F.input_file_name(), r"dt=(\d{4}-\d{2}-\d{2})", 1)).alias("snapshot_date"),
+        F.upper(F.trim("SYMBOL")).alias("symbol"),
+        F.trim(F.col("NAME OF COMPANY")).alias("company_name"),
+        F.upper(F.trim("SERIES")).alias("series"),
+        F.to_date(F.trim(F.col("DATE OF LISTING")), "dd-MMM-yyyy").alias("listing_date"),
+        F.trim(F.col("ISIN NUMBER")).alias("isin"),
+        num("FACE VALUE").alias("face_value"),
+    )
+    n5_dirs = bronze_dirs("nse_nifty500", None)
+    if n5_dirs:
+        n5 = check_schema(spark.read.option("header", True).csv(n5_dirs[-1]),
+                          ["Symbol", "Industry"], "nse_nifty500")
+        n5 = n5.select(F.upper(F.trim("Symbol")).alias("symbol"),
+                       F.trim("Industry").alias("industry"),
+                       F.lit(True).alias("in_nifty500")).dropDuplicates(["symbol"])
+        eq = eq.join(n5, "symbol", "left")
+    else:
+        eq = eq.withColumn("industry", F.lit(None).cast("string")) \
+               .withColumn("in_nifty500", F.lit(None).cast("boolean"))
+    eq = (eq.withColumn("in_nifty500", F.coalesce("in_nifty500", F.lit(False)))
+            .filter(F.col("snapshot_date").isNotNull())
+            .dropDuplicates(["snapshot_date", "symbol"]))
+    merge_delta(spark, eq, "stock_master", ["snapshot_date", "symbol"])
+    return eq.count()
+
+
 # ---------- corporate_actions + split-adjusted prices ----------
 
 def build_corporate_actions(spark: SparkSession) -> int:
@@ -247,6 +305,8 @@ def main():
     log.info("stock_daily rows: %d", build_stock_daily(spark, days))
     log.info("index_daily rows: %d", build_index_daily(spark, days))
     log.info("fund_nav rows: %d", build_fund_nav(spark, days))
+    log.info("fund_nav_history rows: %d", build_fund_nav_history(spark))
+    log.info("stock_master rows: %d", build_stock_master(spark))
     log.info("corporate_actions rows: %d", build_corporate_actions(spark))
     build_stock_daily_adjusted(spark)
     spark.stop()

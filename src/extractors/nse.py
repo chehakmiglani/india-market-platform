@@ -10,6 +10,17 @@ log = logging.getLogger("extractors.nse")
 BHAV_FULL_URL = "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{ddmmyyyy}.csv"
 INDEX_URL = "https://nsearchives.nseindia.com/content/indices/ind_close_all_{ddmmyyyy}.csv"
 CA_URL = "https://www.nseindia.com/api/corporates-corporateActions"
+# Reference data for dim_stock: all listed equities, and Nifty 500 (has Industry)
+EQUITY_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+NIFTY500_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
+
+
+def extract_reference(d: date, client=None) -> list[str]:
+    """Snapshot of the equity master + industry map; dbt snapshots turn these into SCD2."""
+    return [
+        write_bronze("nse_equity_list", d, "EQUITY_L.csv", _fetch(EQUITY_LIST_URL, d), client),
+        write_bronze("nse_nifty500", d, "ind_nifty500list.csv", _fetch(NIFTY500_URL, d), client),
+    ]
 
 
 def _fetch(url: str, d: date) -> bytes:

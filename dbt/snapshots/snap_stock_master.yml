@@ -1,0 +1,9 @@
+snapshots:
+  - name: snap_stock_master
+    description: SCD Type 2 history of the NSE equity master (renames, face-value changes, re-classification).
+    relation: ref('stg_stock_master')
+    config:
+      unique_key: symbol
+      strategy: check
+      check_cols: [company_name, isin, face_value, industry, series, in_nifty500]
+      hard_deletes: invalidate

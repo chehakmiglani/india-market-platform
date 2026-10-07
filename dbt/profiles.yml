@@ -1,0 +1,10 @@
+# Run from the repo root:  dbt build --project-dir dbt --profiles-dir dbt
+# DuckDB computes Gold straight off the Delta lake; Gold is later copied to Postgres for Power BI.
+india_market:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DUCKDB_PATH', 'data/warehouse/market.duckdb') }}"
+      extensions: [delta]
+      threads: 4

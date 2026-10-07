@@ -1,0 +1,97 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: Calendar with Indian FY and NSE trading days / holidays derived from loaded data.
+    columns:
+      - name: date_key
+        data_tests: [unique, not_null]
+
+  - name: dim_stock
+    description: SCD2 equity master. Join facts on symbol + trade_date between valid_from and valid_to.
+    columns:
+      - name: stock_sk
+        data_tests: [unique, not_null]
+    data_tests:
+      - expression_is_true:
+          expression: "valid_from < valid_to"
+
+  - name: dim_fund
+    columns:
+      - name: scheme_code
+        data_tests: [unique, not_null]
+      - name: plan
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['Direct', 'Regular']
+
+  - name: dim_index
+    columns:
+      - name: index_sk
+        data_tests: [unique, not_null]
+
+  - name: fact_stock_daily
+    description: Daily OHLCV per stock (split/bonus adjusted) with surveillance-ready metrics.
+    data_tests:
+      - dbt_unique_combo:
+          columns: [trade_date, symbol]
+      - expression_is_true:
+          expression: "high >= low and close between low * 0.999 and high * 1.001"
+      - expression_is_true:
+          expression: "deliv_pct is null or deliv_pct between 0 and 100"
+      - expression_is_true:
+          expression: "volume >= 0"
+    columns:
+      - name: date_key
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: stock_sk
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_stock')
+                field: stock_sk
+
+  - name: fact_index_daily
+    data_tests:
+      - dbt_unique_combo:
+          columns: [trade_date, index_name]
+    columns:
+      - name: index_sk
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_index')
+                field: index_sk
+
+  - name: fact_fund_nav
+    data_tests:
+      - dbt_unique_combo:
+          columns: [scheme_code, nav_date]
+      - expression_is_true:
+          expression: "nav > 0"
+    columns:
+      - name: scheme_code
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_fund')
+                field: scheme_code
+
+  - name: fact_portfolio_txn
+    columns:
+      - name: txn_id
+        data_tests: [unique, not_null]
+      - name: unit_price
+        description: Trade price for stocks, NAV for funds. Null = no NAV found within 10 days.
+        data_tests: [not_null]
+      - name: txn_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['BUY', 'SELL', 'SIP', 'LUMPSUM', 'REDEEM', 'SWP']

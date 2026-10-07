@@ -1,0 +1,31 @@
+version: 2
+
+models:
+  - name: mart_portfolio_holdings
+    description: Holdings, average cost, unrealised/realised P&L and weights per owner.
+    data_tests:
+      - dbt_unique_combo:
+          columns: [owner, asset_class, instrument_id]
+      - expression_is_true:
+          expression: "held_qty >= -0.0001"   # can't sell more than you hold
+    columns:
+      - name: current_price
+        data_tests: [not_null]
+
+  - name: mart_portfolio_xirr
+    description: XIRR for each owner's whole portfolio and for each holding.
+
+  - name: mart_sip_tracker
+    description: SIP installments, regularity and lapse flag per fund.
+
+  - name: mart_fund_performance
+    description: Returns (1M..5Y CAGR), volatility, Sharpe, 3Y max drawdown, rolling 1Y return stats.
+    columns:
+      - name: scheme_code
+        data_tests: [unique, not_null]
+
+  - name: mart_sector_performance
+    description: Daily breadth, average / turnover-weighted returns per industry.
+    data_tests:
+      - dbt_unique_combo:
+          columns: [trade_date, industry]

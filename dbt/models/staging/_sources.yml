@@ -1,0 +1,28 @@
+version: 2
+
+sources:
+  - name: silver
+    description: Delta tables written by src/spark_jobs/silver.py
+    config:
+      meta:
+        external_location: "delta_scan('{{ env_var('LAKE_ROOT', 'data/lake') }}/silver/{name}')"
+    tables:
+      - name: stock_daily_adjusted
+        config:
+          loaded_at_field: _ingested_at
+          freshness:
+            warn_after: {count: 4, period: day}
+            error_after: {count: 7, period: day}
+      - name: index_daily
+      - name: fund_nav
+      - name: fund_nav_history
+      - name: corporate_actions
+      - name: stock_master
+
+  - name: portfolio
+    description: Transactions CSV. Sample in repo; point PORTFOLIO_CSV at your real file (kept local).
+    tables:
+      - name: portfolio_txn
+        config:
+          meta:
+            external_location: "read_csv('{{ env_var('PORTFOLIO_CSV', 'data/sample/portfolio.csv') }}', header=true, auto_detect=true)"

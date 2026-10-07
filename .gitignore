@@ -5,6 +5,12 @@ __pycache__/
 .pytest_cache/
 data/local/
 data/lake/
+data/warehouse/
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+logs/
 *.pbix
 .idea/
 .vscode/
+dbt/.user.yml

@@ -71,6 +71,24 @@ def parse_navall(text: str) -> list[dict]:
     return rows
 
 
+def parse_mfapi(payload: dict) -> list[dict]:
+    """mfapi.in /mf/{code} -> rows. Dates are dd-mm-yyyy, NAVs are strings."""
+    meta = payload.get("meta") or {}
+    code = int(meta["scheme_code"])
+    rows = []
+    for r in payload.get("data") or []:
+        try:
+            nav = float(r["nav"])
+            d = datetime.strptime(r["date"], "%d-%m-%Y").date()
+        except (KeyError, ValueError):
+            continue
+        if nav > 0:
+            rows.append({"scheme_code": code, "nav_date": d, "nav": nav,
+                         "scheme_name": meta.get("scheme_name"), "amc": meta.get("fund_house"),
+                         "category": meta.get("scheme_category")})
+    return rows
+
+
 def _nz(s: str) -> str | None:
     s = s.strip()
     return None if s in ("", "-") else s

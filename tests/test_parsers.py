@@ -1,6 +1,19 @@
 import pytest
 
-from src.spark_jobs.parsers import adjustment_factor, parse_navall
+from src.spark_jobs.parsers import adjustment_factor, parse_mfapi, parse_navall
+
+
+def test_parse_mfapi_skips_bad_rows():
+    payload = {"meta": {"scheme_code": 122639, "scheme_name": "PPFAS", "fund_house": "PPFAS MF",
+                        "scheme_category": "Equity Scheme - Flexi Cap Fund"},
+               "data": [{"date": "06-10-2026", "nav": "88.99700"},
+                        {"date": "03-10-2026", "nav": "0.0"},
+                        {"date": "bad", "nav": "1"}]}
+    rows = parse_mfapi(payload)
+    assert len(rows) == 1
+    assert rows[0]["nav"] == pytest.approx(88.997)
+    assert str(rows[0]["nav_date"]) == "2026-10-06"
+    assert rows[0]["category"] == "Equity Scheme - Flexi Cap Fund"
 
 
 @pytest.mark.parametrize("subject,expected", [

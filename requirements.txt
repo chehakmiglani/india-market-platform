@@ -6,3 +6,5 @@ python-dotenv>=1.0
 pytest>=8.0
 pyspark==4.0.*
 delta-spark==4.0.*
+dbt-duckdb>=1.9
+duckdb>=1.1

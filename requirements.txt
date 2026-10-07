@@ -4,3 +4,5 @@ yfinance>=0.2.40
 pandas>=2.1
 python-dotenv>=1.0
 pytest>=8.0
+pyspark==4.0.*
+delta-spark==4.0.*

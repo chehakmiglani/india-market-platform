@@ -1,5 +1,4 @@
 """NSE extractors: full bhavcopy (prices + delivery %), indices. Falls back to yfinance."""
-import io
 import logging
 from datetime import date
 
@@ -10,6 +9,7 @@ log = logging.getLogger("extractors.nse")
 # Full bhavcopy incl. DELIV_QTY / DELIV_PER
 BHAV_FULL_URL = "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{ddmmyyyy}.csv"
 INDEX_URL = "https://nsearchives.nseindia.com/content/indices/ind_close_all_{ddmmyyyy}.csv"
+CA_URL = "https://www.nseindia.com/api/corporates-corporateActions"
 
 
 def _fetch(url: str, d: date) -> bytes:
@@ -22,6 +22,20 @@ def _fetch(url: str, d: date) -> bytes:
     if not r.content or r.content[:1] == b"<":  # HTML block page, not CSV
         raise RuntimeError("NSE returned HTML (likely blocked)")
     return r.content
+
+
+def extract_corporate_actions(from_d: date, to_d: date, run_d: date, client=None) -> str:
+    """Splits / bonuses / dividends announced with ex-dates in [from_d, to_d] (JSON API)."""
+    url = (f"{CA_URL}?index=equities&from_date={from_d:%d-%m-%Y}&to_date={to_d:%d-%m-%Y}")
+    s = make_session()
+    s.get("https://www.nseindia.com/companies-listing/corporate-filings-actions", timeout=30)
+    r = polite_get(s, url, headers={"Accept": "application/json"})
+    r.raise_for_status()
+    rows = r.json()  # raises if NSE served an HTML block page
+    if not isinstance(rows, list):
+        raise RuntimeError(f"Unexpected corporate actions payload: {type(rows)}")
+    return write_bronze("nse_corp_actions", run_d,
+                        f"ca_{from_d:%Y%m%d}_{to_d:%Y%m%d}.json", r.content, client)
 
 
 def extract_bhavcopy(d: date, client=None) -> str:

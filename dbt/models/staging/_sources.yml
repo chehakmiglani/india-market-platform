@@ -17,6 +17,10 @@ sources:
       - name: fund_nav
       - name: fund_nav_history
       - name: corporate_actions
+      - name: announcements
+        description: NSE corporate announcements (company filings + NSE volume/price queries)
+      - name: surveillance_lists
+        description: Daily snapshots of NSE's ASM (short/long term) and GSM lists
       - name: stock_master
 
   - name: portfolio

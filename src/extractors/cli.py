@@ -2,6 +2,7 @@
     python -m src.extractors.cli --date 2026-10-07 [--source all|nse|amfi]
     python -m src.extractors.cli --start 2026-09-01 --end 2026-10-06 --source nse
     python -m src.extractors.cli --date 2026-10-07 --source corp_actions
+    python -m src.extractors.cli --start 2026-08-01 --end 2026-10-07 --source announcements
     python -m src.extractors.cli --date 2026-10-07 --source reference   # equity list + industries
     python -m src.extractors.cli --date 2026-10-07 --source mfapi       # NAV history for watchlist
 """
@@ -44,12 +45,20 @@ def main():
     p.add_argument("--start", type=date.fromisoformat)
     p.add_argument("--end", type=date.fromisoformat)
     p.add_argument("--source", default="all",
-                   choices=["all", "nse", "amfi", "corp_actions", "reference", "mfapi"])
+                   choices=["all", "nse", "amfi", "corp_actions", "announcements", "reference", "mfapi"])
     a = p.parse_args()
 
     if a.source == "corp_actions":
         start = a.start or a.date - timedelta(days=365)
         nse.extract_corporate_actions(start, a.end or a.date, a.date)
+        return
+    if a.source == "announcements":
+        # NSE caps very large ranges; fetch one week at a time
+        start, end = a.start or a.date - timedelta(days=7), a.end or a.date
+        while start <= end:
+            stop = min(start + timedelta(days=6), end)
+            nse.extract_announcements(start, stop, stop)
+            start = stop + timedelta(days=1)
         return
     if a.source == "reference":
         nse.extract_reference(a.date)

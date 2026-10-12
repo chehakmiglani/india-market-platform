@@ -1,0 +1,138 @@
+version: 2
+
+models:
+  - name: int_surveillance_signals
+    description: Every surveillance rule evaluated per stock-day (adjusted prices; needs 25 days of history).
+    data_tests:
+      - dbt_unique_combo:
+          columns: [trade_date, symbol]
+
+  - name: fact_surveillance_alert
+    description: >
+      Stock-days scoring >= min_alert_score. risk_score = strongest rule + half of the other rules
+      + 10 if illiquid, capped at 100. HIGH >= 70, MEDIUM >= 40. Signals for analysis, not accusations.
+    columns:
+      - name: alert_id
+        data_tests: [unique, not_null]
+      - name: reason
+        data_tests: [not_null]
+      - name: risk_band
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['HIGH', 'MEDIUM', 'LOW']
+      - name: stock_sk
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_stock')
+                field: stock_sk
+    data_tests:
+      - expression_is_true:
+          expression: "risk_score between 0 and 100"
+      - expression_is_true:
+          expression: "rules_triggered <> ''"
+
+  - name: int_alert_outcomes
+    description: >
+      Per stock over the alert window: our best alert band vs what NSE did (exchange query on
+      volume/price, ASM/GSM listing). query_lead_days > 0 means we flagged it before NSE queried.
+    columns:
+      - name: symbol
+        data_tests: [unique, not_null]
+      - name: best_band
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['HIGH', 'MEDIUM', 'LOW', 'NOT_ALERTED']
+
+  - name: mart_surveillance_validation
+    description: >
+      Hit rate of each alert band against NSE's own surveillance actions, with lift over the
+      all-stock base rate (1.0 = no better than random). The evidence that the rules work.
+    columns:
+      - name: segment
+        data_tests: [unique, not_null]
+
+unit_tests:
+  - name: test_risk_score_dampens_correlated_rules
+    description: Volume spike (10x -> 33 pts) + price shock (12% excess -> 24 pts) = 33 + 12 = 45, not 57.
+      The results filing a day earlier is attached; routine and >3-day-old filings are not.
+    model: fact_surveillance_alert
+    given:
+      - input: ref('stg_announcements')
+        rows:
+          - {symbol: TEST, announced_date: 2026-10-05, news_type: RESULTS}
+          - {symbol: TEST, announced_date: 2026-10-06, news_type: ROUTINE}
+          - {symbol: TEST, announced_date: 2026-09-30, news_type: ORDER_WIN}
+      - input: ref('int_surveillance_signals')
+        rows:
+          - {trade_date: 2026-10-06, date_key: 20261006, symbol: TEST, stock_sk: x, company_name: Test Ltd,
+             industry: IT, series: EQ, close: 112, return_pct: 12.5, gap_pct: 1, return_5d_pct: 14,
+             return_3d_pct: 13, volume: 1000000, volume_ratio_20d: 10, volume_ratio_5d: 3,
+             deliv_pct: 40, deliv_pct_5d: 40, deliv_pct_20d_avg: 45, peer_return_pct: 0.5,
+             avg_turnover_cr_20d: 5, circuit_streak: 0, history_days: 100,
+             r_volume_spike: true, r_price_shock: true, r_pump: false, r_dump_after_pump: false,
+             r_delivery_anomaly: false, r_circuit_streak: false, r_gap_move: false}
+    expect:
+      rows:
+        - {symbol: TEST, risk_score: 45, risk_band: MEDIUM, rules_triggered: "VOLUME_SPIKE, PRICE_SHOCK",
+           reason: "Volume 10.0x its 20-day average; Moved +12.5% while its sector moved +0.5%",
+           news_types: RESULTS, material_news_count: 1, exchange_query: false}
+
+  - name: test_illiquid_pump_then_dump_is_high
+    description: Dump after pump (30) + volume spike 16x (40) on an illiquid stock (+10) = 40 + 15 + 10 = 65.
+    model: fact_surveillance_alert
+    given:
+      - input: ref('stg_announcements')
+        rows: []
+      - input: ref('int_surveillance_signals')
+        rows:
+          - {trade_date: 2026-10-06, date_key: 20261006, symbol: PUMPY, stock_sk: y, company_name: Pumpy Ltd,
+             industry: Unclassified, series: EQ, close: 50, return_pct: -9.5, gap_pct: -2, return_5d_pct: -5,
+             return_3d_pct: -18, volume: 500000, volume_ratio_20d: 16, volume_ratio_5d: 4,
+             deliv_pct: 20, deliv_pct_5d: 25, deliv_pct_20d_avg: 50, peer_return_pct: -0.2,
+             avg_turnover_cr_20d: 0.5, circuit_streak: 0, history_days: 100,
+             r_volume_spike: true, r_price_shock: false, r_pump: false, r_dump_after_pump: true,
+             r_delivery_anomaly: false, r_circuit_streak: false, r_gap_move: false}
+    expect:
+      rows:
+        - {symbol: PUMPY, risk_score: 65, risk_band: MEDIUM, rules_triggered: "VOLUME_SPIKE, DUMP_AFTER_PUMP"}
+
+  - name: test_below_threshold_is_not_alerted
+    description: A lone 5% gap (10 pts) on a liquid stock stays under min_alert_score.
+    model: fact_surveillance_alert
+    given:
+      - input: ref('stg_announcements')
+        rows: []
+      - input: ref('int_surveillance_signals')
+        rows:
+          - {trade_date: 2026-10-06, date_key: 20261006, symbol: CALM, stock_sk: z, company_name: Calm Ltd,
+             industry: IT, series: EQ, close: 105, return_pct: 5.2, gap_pct: 5, return_5d_pct: 6,
+             return_3d_pct: 5, volume: 100000, volume_ratio_20d: 1.2, volume_ratio_5d: 1,
+             deliv_pct: 50, deliv_pct_5d: 50, deliv_pct_20d_avg: 50, peer_return_pct: 0.4,
+             avg_turnover_cr_20d: 20, circuit_streak: 0, history_days: 100,
+             r_volume_spike: false, r_price_shock: false, r_pump: false, r_dump_after_pump: false,
+             r_delivery_anomaly: false, r_circuit_streak: false, r_gap_move: true}
+    expect:
+      rows: []
+
+  - name: test_validation_lift_vs_base_rate
+    description: >
+      4 stocks, 2 queried by NSE (base 50%). The one HIGH stock was queried a day after our alert:
+      100% hit rate, lift 2.0, flagged before NSE.
+    model: mart_surveillance_validation
+    given:
+      - input: ref('int_alert_outcomes')
+        rows:
+          - {symbol: A, best_band: HIGH, exchange_queried: true, query_lead_days: 1, on_stasm: true, on_any_list: true}
+          - {symbol: B, best_band: MEDIUM, exchange_queried: false, on_stasm: false, on_any_list: false}
+          - {symbol: C, best_band: NOT_ALERTED, exchange_queried: true, on_stasm: false, on_any_list: false}
+          - {symbol: D, best_band: NOT_ALERTED, exchange_queried: false, on_stasm: false, on_any_list: false}
+    expect:
+      rows:
+        - {segment: HIGH, stocks: 1, queried: 1, queried_pct: 100.0, queried_lift: 2.0, stasm_lift: 4.0, flagged_before_query: 1}
+        - {segment: MEDIUM, stocks: 1, queried: 0, queried_pct: 0.0, queried_lift: 0.0, stasm_lift: 0.0, flagged_before_query: 0}
+        - {segment: ANY_ALERT, stocks: 2, queried: 1, queried_pct: 50.0, queried_lift: 1.0, stasm_lift: 2.0, flagged_before_query: 1}
+        - {segment: NOT_ALERTED, stocks: 2, queried: 1, queried_pct: 50.0, queried_lift: 1.0, stasm_lift: 0.0, flagged_before_query: 0}
+        - {segment: ALL_STOCKS, stocks: 4, queried: 2, queried_pct: 50.0, queried_lift: 1.0, stasm_lift: 1.0, flagged_before_query: 1}

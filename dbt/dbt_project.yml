@@ -14,6 +14,22 @@ vars:
   risk_free_rate: 0.065          # ~ 1Y T-bill, for Sharpe ratio
   trading_days_per_year: 252
   min_stocks_per_trading_day: 1500
+  surveillance:
+    volume_spike_x: 5              # volume >= 5x its 20-day average
+    min_spike_turnover_cr: 1       # ... and at least Rs 1 cr actually traded that day
+    price_shock_pct: 8             # |return| >= 8% ...
+    sector_calm_pct: 2             # ... while the sector median moved < 2%
+    pump_return_5d_pct: 15         # up >= 15% in 5 days
+    pump_volume_x: 2               # on >= 2x volume
+    pump_low_delivery_ratio: 0.7   # with delivery % < 70% of its usual level
+    dump_lookback_days: 10         # dump must follow a pump within 10 trading days
+    dump_return_pct: 8             # day fall >= 8% ...
+    dump_return_3d_pct: 15         # ... or 3-day fall >= 15%
+    delivery_z: 2.5                # delivery % >= mean + 2.5 sd
+    circuit_streak_days: 3         # consecutive near-band closes (5/10/20% bands)
+    gap_pct: 5                     # open >= 5% away from previous close
+    illiquid_turnover_cr: 1        # avg turnover < Rs 1 cr/day adds risk
+    min_alert_score: 30
 
 models:
   india_market:
@@ -21,7 +37,7 @@ models:
       +materialized: view
       +schema: staging
     intermediate:
-      +materialized: view
+      +materialized: table
       +schema: intermediate
     marts:
       +materialized: table

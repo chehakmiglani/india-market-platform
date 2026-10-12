@@ -15,6 +15,20 @@ EQUITY_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.cs
 NIFTY500_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
 
 
+HOLIDAY_URL = "https://www.nseindia.com/api/holiday-master?type=trading"
+
+
+def extract_holidays(d: date, client=None) -> str:
+    """Official trading holidays for the current year (equity segment = 'CM')."""
+    s = make_session()
+    s.get("https://www.nseindia.com/resources/exchange-communication-holidays", timeout=30)
+    r = polite_get(s, HOLIDAY_URL, headers={"Accept": "application/json"})
+    r.raise_for_status()
+    if "CM" not in r.json():
+        raise RuntimeError("Holiday payload has no 'CM' segment (schema change?)")
+    return write_bronze("nse_holidays", d, "holidays.json", r.content, client)
+
+
 def extract_reference(d: date, client=None) -> list[str]:
     """Snapshot of the equity master + industry map; dbt snapshots turn these into SCD2."""
     return [
@@ -47,6 +61,44 @@ def extract_corporate_actions(from_d: date, to_d: date, run_d: date, client=None
         raise RuntimeError(f"Unexpected corporate actions payload: {type(rows)}")
     return write_bronze("nse_corp_actions", run_d,
                         f"ca_{from_d:%Y%m%d}_{to_d:%Y%m%d}.json", r.content, client)
+
+
+ASM_URL = "https://www.nseindia.com/api/reportASM"
+GSM_URL = "https://www.nseindia.com/api/reportGSM"
+
+
+def extract_surveillance_lists(d: date, client=None) -> list[str]:
+    """Today's NSE ASM / GSM lists. NSE publishes no history, so a daily snapshot is the
+    only way to learn when a stock was added (used to validate our own alerts)."""
+    s = make_session()
+    s.get("https://www.nseindia.com/reports/asm", timeout=30)
+    keys = []
+    for url, name in [(ASM_URL, "asm.json"), (GSM_URL, "gsm.json")]:
+        r = polite_get(s, url, headers={"Accept": "application/json"})
+        r.raise_for_status()
+        r.json()  # raises if NSE served an HTML block page
+        keys.append(write_bronze("nse_surveillance_lists", d, name, r.content, client))
+    return keys
+
+
+ANN_URL = "https://www.nseindia.com/api/corporate-announcements"
+
+
+def extract_announcements(from_d: date, to_d: date, run_d: date, client=None) -> str:
+    """Company filings (results, orders, NSE volume/price queries...) in [from_d, to_d] (JSON API).
+
+    Context for surveillance alerts: a spike with a results filing behind it is not suspicious.
+    """
+    url = f"{ANN_URL}?index=equities&from_date={from_d:%d-%m-%Y}&to_date={to_d:%d-%m-%Y}"
+    s = make_session()
+    s.get("https://www.nseindia.com/companies-listing/corporate-filings-announcements", timeout=30)
+    r = polite_get(s, url, headers={"Accept": "application/json"})
+    r.raise_for_status()
+    rows = r.json()  # raises if NSE served an HTML block page
+    if not isinstance(rows, list):
+        raise RuntimeError(f"Unexpected announcements payload: {type(rows)}")
+    return write_bronze("nse_announcements", run_d,
+                        f"ann_{from_d:%Y%m%d}_{to_d:%Y%m%d}.json", r.content, client)
 
 
 def extract_bhavcopy(d: date, client=None) -> str:

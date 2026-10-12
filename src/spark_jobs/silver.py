@@ -8,7 +8,7 @@ import argparse
 import json
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from delta.tables import DeltaTable
@@ -252,6 +252,59 @@ def build_corporate_actions(spark: SparkSession) -> int:
     return df.count()
 
 
+def build_announcements(spark: SparkSession) -> int:
+    """Company filings; seq_id is NSE's own id, so overlapping fetch windows dedupe cleanly."""
+    rows = []
+    for uri in bronze_dirs("nse_announcements", None):
+        d = Path(uri.replace("file:///", "").replace("file://", ""))
+        for f in d.glob("*.json"):
+            for r in json.loads(f.read_text(encoding="utf-8")):
+                try:
+                    ts = datetime.strptime(r["sort_date"], "%Y-%m-%d %H:%M:%S")
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not r.get("seq_id") or not r.get("symbol"):
+                    continue
+                rows.append({"seq_id": str(r["seq_id"]), "symbol": r["symbol"].strip().upper(),
+                             "announced_at": ts, "category": (r.get("desc") or "").strip(),
+                             "summary": (r.get("attchmntText") or "").strip(),
+                             "attachment_url": r.get("attchmntFile")})
+    if not rows:
+        return 0
+    df = spark.createDataFrame(rows, schema=(
+        "seq_id string, symbol string, announced_at timestamp, category string, summary string, "
+        "attachment_url string")).dropDuplicates(["seq_id"])
+    merge_delta(spark, df, "announcements", ["seq_id"])
+    return df.count()
+
+
+def build_surveillance_lists(spark: SparkSession) -> int:
+    """One row per (snapshot_date, symbol, list_type) from the daily ASM/GSM snapshots."""
+    rows = []
+    for uri in bronze_dirs("nse_surveillance_lists", None):
+        d = Path(uri.replace("file:///", "").replace("file://", ""))
+        snap = date.fromisoformat(d.name.removeprefix("dt="))
+        asm, gsm = d / "asm.json", d / "gsm.json"
+        if asm.exists():
+            data = json.loads(asm.read_text(encoding="utf-8"))
+            for key, list_type in [("shortterm", "STASM"), ("longterm", "LTASM")]:
+                for r in (data.get(key) or {}).get("data") or []:
+                    rows.append((snap, r["symbol"].strip().upper(), list_type,
+                                 r.get("asmSurvIndicator"), r.get("survDesc")))
+        if gsm.exists():
+            for r in json.loads(gsm.read_text(encoding="utf-8")) or []:
+                rows.append((snap, r["symbol"].strip().upper(), "GSM", r.get("gsmStage"), r.get("survDesc")))
+    if not rows:
+        return 0
+    df = spark.createDataFrame(rows, schema=(
+        "snapshot_date date, symbol string, list_type string, stage string, description string"
+    )).dropDuplicates(["snapshot_date", "symbol", "list_type"])
+    # Full rewrite from bronze (small): a snapshot removed from bronze must disappear here too
+    (df.write.format("delta").mode("overwrite").option("overwriteSchema", True)
+       .save(lake_path("silver", "surveillance_lists")))
+    return df.count()
+
+
 def build_stock_daily_adjusted(spark: SparkSession) -> int:
     """Full rebuild: a new split changes *all* earlier prices for that symbol.
 
@@ -308,6 +361,8 @@ def main():
     log.info("fund_nav_history rows: %d", build_fund_nav_history(spark))
     log.info("stock_master rows: %d", build_stock_master(spark))
     log.info("corporate_actions rows: %d", build_corporate_actions(spark))
+    log.info("announcements rows: %d", build_announcements(spark))
+    log.info("surveillance_lists rows: %d", build_surveillance_lists(spark))
     build_stock_daily_adjusted(spark)
     spark.stop()
 

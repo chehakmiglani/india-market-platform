@@ -15,10 +15,19 @@ vars:
   trading_days_per_year: 252
   min_stocks_per_trading_day: 1500
   surveillance:
-    volume_spike_x: 5              # volume >= 5x its 20-day average
-    min_spike_turnover_cr: 1       # ... and at least Rs 1 cr actually traded that day
-    price_shock_pct: 8             # |return| >= 8% ...
-    sector_calm_pct: 2             # ... while the sector median moved < 2%
+    # How "unusual volume / price move" is judged (comparison in docs/baseline_ablation.md):
+    #   flat      - same fixed multiple / percentage for every stock. Default: agrees best with NSE.
+    #   hybrid    - flat rule AND unusual for this stock: ~19% fewer alerts, ~5 pts less recall.
+    #   per_stock - z-scores vs the stock's own 20-day behaviour only: agrees worst with NSE.
+    baseline: flat
+    volume_spike_x: 5              # flat/hybrid: volume >= 5x its 20-day average
+    min_spike_turnover_cr: 1       # all: at least Rs 1 cr actually traded that day
+    price_shock_pct: 8             # flat/hybrid: |return| >= 8% ...
+    sector_calm_pct: 2             # flat/hybrid: ... while the sector median moved < 2%
+    volume_spike_z: 3              # hybrid/per_stock: log-volume >= 3 sd above its own 20-day mean
+    volume_spike_min_x: 2          # per_stock: ... and at least 2x its average (steady stocks: tiny sd)
+    price_shock_z: 3               # hybrid/per_stock: move vs sector >= 3x its own daily volatility
+    price_shock_min_pct: 4         # per_stock: ... and at least 4 percentage points
     pump_return_5d_pct: 15         # up >= 15% in 5 days
     pump_volume_x: 2               # on >= 2x volume
     pump_low_delivery_ratio: 0.7   # with delivery % < 70% of its usual level

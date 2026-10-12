@@ -23,6 +23,11 @@ w as (
     select
         f.*,
         coalesce(s.sector_median_return, m.market_median_return)               as peer_return_pct,
+        -- per-stock baselines: how unusual is today for *this* stock? (log volume: it is heavily skewed)
+        (ln(greatest(volume, 1)) - avg(ln(greatest(volume, 1))) over w20)
+            / nullif(stddev_samp(ln(greatest(volume, 1))) over w20, 0)          as volume_z,
+        abs(return_pct - coalesce(s.sector_median_return, m.market_median_return))
+            / greatest(volatility_20d_pct, 1)                                   as price_z,
         -- 5-day window vs the 20 days before it
         avg(volume)    over w5  / nullif(avg(volume)    over w20_before5, 0)    as volume_ratio_5d,
         avg(deliv_pct) over w5                                                  as deliv_pct_5d,
@@ -41,6 +46,7 @@ w as (
     left join market_day m on m.trade_date = f.trade_date
     window
         w            as (partition by f.symbol order by f.trade_date),
+        w20          as (partition by f.symbol order by f.trade_date rows between 20 preceding and 1 preceding),
         w5           as (partition by f.symbol order by f.trade_date rows between 4 preceding and current row),
         w20_before5  as (partition by f.symbol order by f.trade_date rows between 24 preceding and 5 preceding)
 ),
@@ -49,10 +55,21 @@ rules as (
     select
         *,
         history_days >= 25                                                      as has_history,
-        volume_ratio_20d >= {{ v.volume_spike_x }}
+        {% if v.baseline == 'per_stock' %}
+        volume_z >= {{ v.volume_spike_z }} and volume_ratio_20d >= {{ v.volume_spike_min_x }}
             and turnover_lacs >= {{ v.min_spike_turnover_cr }} * 100            as r_volume_spike,
+        price_z >= {{ v.price_shock_z }}
+            and abs(return_pct - peer_return_pct) >= {{ v.price_shock_min_pct }} as r_price_shock,
+        {% else %}
+        volume_ratio_20d >= {{ v.volume_spike_x }}
+            and turnover_lacs >= {{ v.min_spike_turnover_cr }} * 100
+            {% if v.baseline == 'hybrid' %}and volume_z >= {{ v.volume_spike_z }}{% endif %}
+                                                                                as r_volume_spike,
         abs(return_pct) >= {{ v.price_shock_pct }}
-            and abs(peer_return_pct) < {{ v.sector_calm_pct }}                  as r_price_shock,
+            and abs(peer_return_pct) < {{ v.sector_calm_pct }}
+            {% if v.baseline == 'hybrid' %}and price_z >= {{ v.price_shock_z }}{% endif %}
+                                                                                as r_price_shock,
+        {% endif %}
         return_5d_pct >= {{ v.pump_return_5d_pct }}
             and volume_ratio_5d >= {{ v.pump_volume_x }}
             and deliv_pct_5d < deliv_pct_base * {{ v.pump_low_delivery_ratio }} as r_pump,
@@ -88,6 +105,7 @@ select
     trade_date, date_key, symbol, stock_sk, company_name, industry, series,
     close, return_pct, gap_pct, return_5d_pct, round(return_3d * 100, 2) as return_3d_pct,
     volume, volume_ratio_20d, round(volume_ratio_5d, 2) as volume_ratio_5d,
+    round(volume_z, 2) as volume_z, round(price_z, 2) as price_z,
     deliv_pct, round(deliv_pct_5d, 2) as deliv_pct_5d, round(deliv_pct_base, 2) as deliv_pct_20d_avg,
     round(peer_return_pct, 2) as peer_return_pct,
     round(avg_turnover_cr_20d, 2) as avg_turnover_cr_20d,

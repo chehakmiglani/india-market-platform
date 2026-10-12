@@ -8,9 +8,15 @@ with s as (
 scored as (
     select
         s.*,
+        {% if v.baseline == 'per_stock' %}
+        -- points scale with how unusual the day is for this stock: 3 sd -> 24 pts, 5 sd+ -> 40
+        case when r_volume_spike     then least(40, round(8 * volume_z)) else 0 end             as pts_volume,
+        case when r_price_shock      then least(30, round(6 * price_z)) else 0 end              as pts_price_shock,
+        {% else %}
         -- volume: 5x -> 23 pts, 10x -> 33, 16x+ -> 40
         case when r_volume_spike     then least(40, round(10 * log2(volume_ratio_20d))) else 0 end as pts_volume,
         case when r_price_shock      then least(30, round(2 * abs(return_pct - peer_return_pct))) else 0 end as pts_price_shock,
+        {% endif %}
         case when r_pump             then 25 else 0 end                                         as pts_pump,
         case when r_dump_after_pump  then 30 else 0 end                                         as pts_dump,
         case when r_delivery_anomaly then 15 else 0 end                                         as pts_delivery,
@@ -59,8 +65,13 @@ select
         case when r_circuit_streak   then 'CIRCUIT_STREAK' end,
         case when r_gap_move         then 'GAP_MOVE' end)                          as rules_triggered,
     concat_ws('; ',
+        {% if v.baseline == 'per_stock' %}
+        case when r_volume_spike then format('Volume {:.1f}x its 20-day average ({:.1f} sd above its own normal)', volume_ratio_20d, volume_z) end,
+        case when r_price_shock then format('Moved {:+.1f}% while its sector moved {:+.1f}% ({:.1f}x its usual daily swing)', return_pct, peer_return_pct, price_z) end,
+        {% else %}
         case when r_volume_spike then format('Volume {:.1f}x its 20-day average', volume_ratio_20d) end,
         case when r_price_shock then format('Moved {:+.1f}% while its sector moved {:+.1f}%', return_pct, peer_return_pct) end,
+        {% endif %}
         case when r_pump then format('Up {:.1f}% in 5 days on {:.1f}x volume with delivery only {:.0f}% (usual {:.0f}%)',
                                      return_5d_pct, volume_ratio_5d, deliv_pct_5d, deliv_pct_20d_avg) end,
         case when r_dump_after_pump then format('Fell {:.1f}% (3-day {:.1f}%) after a recent pump pattern', return_pct, return_3d_pct) end,
@@ -70,7 +81,7 @@ select
         case when pts_illiquid > 0 then format('Thinly traded (avg turnover Rs {:.2f} cr/day)', avg_turnover_cr_20d) end
     )                                                                              as reason,
     close, return_pct, gap_pct, return_5d_pct, volume, volume_ratio_20d, deliv_pct, deliv_pct_20d_avg,
-    peer_return_pct, avg_turnover_cr_20d, circuit_streak,
+    peer_return_pct, avg_turnover_cr_20d, circuit_streak, volume_z, price_z,
     pts_volume, pts_price_shock, pts_pump, pts_dump, pts_delivery, pts_circuit, pts_gap, pts_illiquid,
     news.news_types,
     coalesce(news.material_news_count, 0)                                          as material_news_count,

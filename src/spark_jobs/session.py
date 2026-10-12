@@ -1,6 +1,8 @@
 """SparkSession with Delta Lake. Local lake by default; MinIO (s3a) when LAKE_BACKEND=s3."""
 import os
+import shutil
 import sys
+import time
 from pathlib import Path
 
 import pyspark
@@ -25,6 +27,13 @@ def get_spark(app: str = "india-market") -> SparkSession:
     # Use the pip-installed PySpark that delta-spark is built against, not a
     # system-wide SPARK_HOME of a different version (NoClassDefFoundError otherwise).
     os.environ["SPARK_HOME"] = os.path.dirname(pyspark.__file__)
+    # Shuffle/spill files go next to the lake, not %TEMP% on the system drive (a full C: kills the job)
+    tmp = Path(os.getenv("SPARK_LOCAL_DIR") or Path(os.getenv("LAKE_ROOT", "data/lake")).parent / "tmp" / "spark")
+    tmp.mkdir(parents=True, exist_ok=True)
+    # Spark on Windows often fails to delete its temp dirs at exit; clear ones older than a day
+    for old in tmp.iterdir():
+        if time.time() - old.stat().st_mtime > 86400:
+            shutil.rmtree(old, ignore_errors=True)
     b = (
         SparkSession.builder.appName(app)
         .master(os.getenv("SPARK_MASTER", "local[*]"))
@@ -33,6 +42,7 @@ def get_spark(app: str = "india-market") -> SparkSession:
         .config("spark.sql.session.timeZone", "Asia/Kolkata")
         .config("spark.sql.shuffle.partitions", "8")
         .config("spark.ui.showConsoleProgress", "false")
+        .config("spark.local.dir", str(tmp.resolve()))
     )
     extra = []
     if os.getenv("LAKE_BACKEND", "s3") == "s3":

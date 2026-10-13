@@ -161,19 +161,24 @@ Use your own portfolio without committing it: put it in `data/local/portfolio.cs
 powershell -ExecutionPolicy Bypass -File scripts\dashboard.ps1     :: opens http://localhost:8501
 ```
 
-A Streamlit app on the Gold tables (read-only; it never holds the warehouse open, so the daily
-run is not blocked):
+A Streamlit app on the Gold tables. Hover any dot or bar for its details; click a dot or a table
+row to open that stock. It is read-only and never holds the warehouse open, so the daily run is
+not blocked.
 
-| Page | What you can do |
+![Validation page](docs/img/dashboard_validation.png)
+
+| Page | What it shows |
 |---|---|
-| Today's alerts | Pick a day; HIGH alerts with their reason and triage line; filter by band and rule |
-| Stock explorer | Candlestick + volume for any stock with alert days marked, its filings, and a **paper invest** button |
-| What happened next | Simulate buying the day after every alert and holding N days, against the median stock |
-| Paper portfolio | Virtual positions and their profit / loss |
-| Does it work | The comparison with NSE's queries and surveillance list |
-| Pipeline health | Run log, data freshness and data-quality checks |
+| Overview | A market map of every flagged stock (price move against volume, sized by score), the high-risk alerts with their news check, and a filterable table |
+| Stock detail | Candlesticks and volume with alert days marked, why it was flagged, **the score broken down by rule**, the filings, and a paper-invest button |
+| After the alert | Simulate buying the day after every alert and holding N days, against the median stock |
+| Paper portfolio | Virtual positions and their profit or loss |
+| Does it work | The comparison with NSE's queries and surveillance list, and who was first |
+| Pipeline health | Data freshness, step timings, run log and data-quality checks |
 
-"What happened next" is the engine's most direct check: over 21 Sep - 12 Oct, a stock bought at the
+![Stock detail](docs/img/dashboard_stock.png)
+
+"After the alert" is the engine's most direct check: over 21 Sep - 12 Oct, a stock bought at the
 open after a HIGH alert was **down 10.9% on average five trading days later**, and only 17% of them
 rose (24 alerts). That is what a pump-and-dump screen should find, on a small sample. The paper
 portfolio and the simulator use virtual money on past data; nothing here is investment advice.

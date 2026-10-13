@@ -118,6 +118,7 @@ lists becomes measurable as that history builds.
 | Surveillance | dbt SQL rules, thresholds as project vars |
 | Triage | Groq / Gemini free tier over plain HTTPS, cached, with rule-based fallback |
 | Alerts | Telegram Bot API |
+| Dashboard | Streamlit + Plotly, in its own virtual environment |
 | Orchestration | `src/pipeline/daily.py` (7 steps, run log, resume from any step) on Windows Task Scheduler |
 | Quality | 51 dbt tests (47 data + 4 unit), 33 pytest tests, pipeline checks in `ops.dq_results`, GitHub Actions |
 
@@ -154,6 +155,29 @@ Optional keys in `.env`: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for the diges
 Use your own portfolio without committing it: put it in `data/local/portfolio.csv` and set
 `PORTFOLIO_CSV=data/local/portfolio.csv`.
 
+## Dashboard
+
+```bat
+powershell -ExecutionPolicy Bypass -File scripts\dashboard.ps1     :: opens http://localhost:8501
+```
+
+A Streamlit app on the Gold tables (read-only; it never holds the warehouse open, so the daily
+run is not blocked):
+
+| Page | What you can do |
+|---|---|
+| Today's alerts | Pick a day; HIGH alerts with their reason and triage line; filter by band and rule |
+| Stock explorer | Candlestick + volume for any stock with alert days marked, its filings, and a **paper invest** button |
+| What happened next | Simulate buying the day after every alert and holding N days, against the median stock |
+| Paper portfolio | Virtual positions and their profit / loss |
+| Does it work | The comparison with NSE's queries and surveillance list |
+| Pipeline health | Run log, data freshness and data-quality checks |
+
+"What happened next" is the engine's most direct check: over 21 Sep - 12 Oct, a stock bought at the
+open after a HIGH alert was **down 10.9% on average five trading days later**, and only 17% of them
+rose (24 alerts). That is what a pump-and-dump screen should find, on a small sample. The paper
+portfolio and the simulator use virtual money on past data; nothing here is investment advice.
+
 ## Data model
 
 **Silver** (Delta): `stock_daily`, `stock_daily_adjusted`, `corporate_actions`, `announcements`,
@@ -176,7 +200,7 @@ there is no copy step between Silver and Gold):
 
 - Train a model on the ASM-inclusion labels once a few weeks of daily list snapshots exist.
 - Read the filing PDFs, not just NSE's one-line summary, in the triage step.
-- A dashboard on the Gold tables.
+- Host the dashboard publicly on a sample of the data.
 
 A Docker / Airflow / Postgres variant of this project lives in
 [india-market-surveillance-platform](https://github.com/chehakmiglani/india-market-surveillance-platform).

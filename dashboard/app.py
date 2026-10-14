@@ -7,6 +7,7 @@ The paper portfolio is virtual money, kept in data/local/ (not committed).
 """
 import json
 import os
+import re
 from datetime import date
 from html import escape
 from pathlib import Path
@@ -185,7 +186,8 @@ def breakdown_chart(a: pd.Series) -> go.Figure:
     return fig
 
 
-def stock_detail(sym: str, on: date | None = None, key: str = "d") -> None:
+def stock_detail(sym: str, on: date | None = None, key: str = "d", compact: bool = False) -> None:
+    """Full panel; compact=True skips the header, tiles and chart (the check view shows its own)."""
     pxd = q("""select trade_date, open, high, low, close, volume, deliv_pct, return_pct, volume_ratio_20d
                from gold.fact_stock_daily where symbol = ? order by trade_date""", (sym,))
     al = q("""select a.*, t.verdict, t.line as triage from gold.fact_surveillance_alert a
@@ -197,24 +199,27 @@ def stock_detail(sym: str, on: date | None = None, key: str = "d") -> None:
     focus = al[al.trade_date.dt.date == on] if on is not None else al.tail(1)
     a = focus.iloc[0] if not focus.empty else None
     name = q("select max(company_name) as n from gold.dim_stock where symbol = ?", (sym,)).n.iloc[0] or ""
-    head = f'<span style="font-size:1.25rem;font-weight:600;color:{INK}">{escape(sym)}</span> <span class="co" style="color:{INK2}">{escape(name)}</span>'
-    if a is not None:
-        head += f' &nbsp;{pill(a.risk_band + " · " + format(a.risk_score, ".0f"), a.risk_band)}'
-        if isinstance(a.verdict, str):
-            head += f' {pill(*VERDICT[a.verdict])}'
-        if a.exchange_query:
-            head += f' {pill("NSE queried the company", "warn")}'
-    st.markdown(head, unsafe_allow_html=True)
-    tiles(tile("Last close", f"₹{last.close:,.2f}", f"{last.return_pct:+.1f}% on {last.trade_date:%d %b}",
-               "ok" if last.return_pct > 0 else "bad"),
-          tile("Volume", f"{last.volume_ratio_20d:.1f}x" if pd.notna(last.volume_ratio_20d) else "n/a", "of its 20-day average"),
-          tile("Delivery", f"{last.deliv_pct:.0f}%" if pd.notna(last.deliv_pct) else "n/a", "of traded shares actually delivered"),
-          tile("Days flagged", str(len(al)), f"since {pxd.trade_date.min():%d %b}"))
-    left, right = st.columns([3, 2], gap="medium")
-    with left:
-        st.plotly_chart(price_chart(pxd, al), width="stretch", config=NOBAR, key=f"px_{key}", theme=None)
-        st.markdown('<div class="note">Triangles mark alert days. Darker volume bars are 5x the average or more. '
-                    'Hover for the numbers.</div>', unsafe_allow_html=True)
+    if not compact:
+        head = f'<span style="font-size:1.25rem;font-weight:600;color:{INK}">{escape(sym)}</span> <span class="co" style="color:{INK2}">{escape(name)}</span>'
+        if a is not None:
+            head += f' &nbsp;{pill(a.risk_band + " · " + format(a.risk_score, ".0f"), a.risk_band)}'
+            if isinstance(a.verdict, str):
+                head += f' {pill(*VERDICT[a.verdict])}'
+            if a.exchange_query:
+                head += f' {pill("NSE queried the company", "warn")}'
+        st.markdown(head, unsafe_allow_html=True)
+        tiles(tile("Last close", f"₹{last.close:,.2f}", f"{last.return_pct:+.1f}% on {last.trade_date:%d %b}",
+                   "ok" if last.return_pct > 0 else "bad"),
+              tile("Volume", f"{last.volume_ratio_20d:.1f}x" if pd.notna(last.volume_ratio_20d) else "n/a", "of its 20-day average"),
+              tile("Delivery", f"{last.deliv_pct:.0f}%" if pd.notna(last.deliv_pct) else "n/a", "of traded shares actually delivered"),
+              tile("Days flagged", str(len(al)), f"since {pxd.trade_date.min():%d %b}"))
+        left, right = st.columns([3, 2], gap="medium")
+        with left:
+            st.plotly_chart(price_chart(pxd, al), width="stretch", config=NOBAR, key=f"px_{key}", theme=None)
+            st.markdown('<div class="note">Triangles mark alert days. Darker volume bars are 5x the average or more. '
+                        'Hover for the numbers.</div>', unsafe_allow_html=True)
+    else:
+        right = st.container()
     with right:
         if a is None:
             st.info("This stock has not been flagged in the window loaded.")
@@ -264,9 +269,308 @@ def stock_detail(sym: str, on: date | None = None, key: str = "d") -> None:
             st.success(f"Added {amount / last.close:,.2f} virtual shares of {sym}.")
 
 
-@st.dialog("Stock detail", width="large")
+# ---------- the safety check: plain-language warning signs for one stock ----------
+
+LEVELS = {
+    "red": ("High caution", "This stock shows the patterns NSE and our engine associate with pump-and-dump risk.",
+            "#d03b3b", "#fcebeb", "#791f1f"),
+    "amber": ("Some warning signs", "Not alarming on its own, but worth understanding before you buy.",
+              "#eda100", "#faeeda", "#633806"),
+    "green": ("No warning signs found", "None of our checks fired. That is not a reason to buy, only the absence "
+              "of red flags.", "#1baf7a", "#eaf3de", "#27500a"),
+}
+MARK = {"bad": ("✕", "#a32d2d"), "warn": ("!", "#854f0b"), "ok": ("✓", "#3b6d11")}
+MY = ROOT / "data" / "local" / "my_stocks.json"
+
+
+def lookback_start(days: int) -> date:
+    d = q(f"select trade_date from (select distinct trade_date from gold.fact_stock_daily) "
+          f"order by trade_date desc limit 1 offset {int(days) - 1}")
+    return d.trade_date.iloc[0].date()
+
+
+def optional(sql: str, params: tuple) -> pd.DataFrame | None:
+    """Queries on staging views need the Delta lake on this machine; None if it isn't there."""
+    try:
+        return q(sql, params)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def outcome_stats() -> pd.DataFrame:
+    """Average move 5 trading days after an alert (bought at the next open), by band."""
+    return q("""
+        with px as (select symbol, trade_date, lead(open, 1) over w as entry, lead(close, 5) over w as exit
+                    from gold.fact_stock_daily window w as (partition by symbol order by trade_date))
+        select a.risk_band, count(*) as n, avg((p.exit / p.entry - 1) * 100) as avg_ret,
+               avg(case when p.exit < p.entry then 1.0 else 0 end) * 100 as pct_down
+        from gold.fact_surveillance_alert a join px p using (symbol, trade_date)
+        where p.entry > 0 and p.exit is not null group by 1""")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def assess(sym: str) -> dict:
+    """Verdict + checklist. Every check is a fact from the warehouse, phrased for a non-expert."""
+    px_ = q("""select trade_date, close, volume, deliv_pct, avg_deliv_pct_20d, turnover_lacs, return_5d_pct
+               from gold.fact_stock_daily where symbol = ? order by trade_date desc limit 25""", (sym,))
+    if px_.empty:
+        return {"level": None}
+    last = px_.iloc[0]
+    since10, since30 = lookback_start(10), lookback_start(22)
+    checks, band = [], None
+
+    lists = optional("""select list_type, stage, description, snapshot_date from staging.stg_surveillance_lists
+                        where symbol = ? and snapshot_date = (select max(snapshot_date) from staging.stg_surveillance_lists)""", (sym,))
+    if lists is not None and not lists.empty:
+        r = lists.iloc[0]
+        checks.append(("bad", "On NSE's surveillance list",
+                       f"{r.description} (as of {r.snapshot_date:%d %b}). NSE puts stocks here after unusual price or "
+                       "volume behaviour, and restricts how they can be traded."))
+    elif lists is not None:
+        checks.append(("ok", "Not on any NSE surveillance list", "Checked against NSE's short-term, long-term and graded lists."))
+
+    al = q("""select a.trade_date, a.risk_band, a.risk_score, a.reason, a.news_types, t.verdict, t.line as triage
+              from gold.fact_surveillance_alert a left join ops.alert_triage t using (alert_id)
+              where a.symbol = ? and a.trade_date >= ? and a.risk_band in ('HIGH', 'MEDIUM')
+              order by a.risk_score desc, a.trade_date desc""", (sym, since10))
+    if al.empty:
+        checks.append(("ok", "No unusual trading in the last 10 trading days", "Our 7 rules did not flag it at medium or high risk."))
+    else:
+        top = al.iloc[0]
+        band = top.risk_band
+        what = "; ".join(top.reason.split("; ")[:2]).lower()
+        checks.append(("bad" if band == "HIGH" else "warn",
+                       f"Flagged {len(al)} time{'s' if len(al) > 1 else ''} in the last 10 trading days ({band.lower()} risk)",
+                       f"Strongest on {top.trade_date:%d %b}: {what}."))
+        if isinstance(top.verdict, str):
+            checks.append(({"EXPLAINED": "ok", "UNCLEAR": "warn", "UNEXPLAINED": "bad"}[top.verdict],
+                           "Is the move explained by company news?", top.triage))
+        elif isinstance(top.news_types, str):
+            checks.append(("ok", "The company filed news around the move",
+                           f"Filings: {top.news_types.replace('_', ' ').lower()}. Read them before assuming the move is real."))
+        else:
+            checks.append(("bad" if band == "HIGH" else "warn", "No company news behind the move",
+                           "Nothing was filed in the 3 days before. Big moves without news are the classic pump pattern."))
+
+    qs = optional("""select announced_date, category from staging.stg_announcements
+                     where symbol = ? and news_type = 'EXCHANGE_QUERY' and announced_date >= ? order by announced_date desc""",
+                  (sym, since30))
+    if qs is not None and not qs.empty:
+        checks.append(("bad", "NSE asked the company to explain a move",
+                       f"{qs.iloc[0].category} on {qs.iloc[0].announced_date:%d %b}"
+                       + (f", and {len(qs) - 1} more time(s) this month." if len(qs) > 1 else ".")))
+    elif qs is not None:
+        checks.append(("ok", "No NSE queries this month", "NSE has not asked the company about unusual price or volume."))
+
+    turnover_cr = px_.turnover_lacs.head(20).mean() / 100
+    if turnover_cr < 1:
+        checks.append(("warn", f"Thinly traded: about ₹{turnover_cr:.2f} cr a day",
+                       "Small amounts of money can move the price, and selling can be hard when everyone wants out."))
+    else:
+        checks.append(("ok", f"Liquid enough: about ₹{turnover_cr:,.0f} cr traded a day", "Hard to move with small amounts of money."))
+
+    if pd.notna(last.deliv_pct) and pd.notna(last.avg_deliv_pct_20d) and last.deliv_pct < 0.6 * last.avg_deliv_pct_20d:
+        checks.append(("warn", "Mostly short-term trading on the last day",
+                       f"Only {last.deliv_pct:.0f}% of traded shares were delivered, against a usual "
+                       f"{last.avg_deliv_pct_20d:.0f}%. Buyers were not holding on."))
+
+    if len(px_) >= 21:
+        run = (last.close / px_.close.iloc[20] - 1) * 100
+        if run >= 30:
+            checks.append(("warn", f"Up {run:.0f}% in 20 trading days", "Fast run-ups are where late buyers get hurt most."))
+        elif run <= -30:
+            checks.append(("warn", f"Down {abs(run):.0f}% in 20 trading days", "Check why before assuming it is cheap."))
+
+    kinds = {c[0] for c in checks}
+    level = "red" if "bad" in kinds else "amber" if "warn" in kinds else "green"
+    checks.sort(key=lambda c: {"bad": 0, "warn": 1, "ok": 2}[c[0]])
+    return {"level": level, "checks": checks, "band": band, "as_of": last.trade_date, "close": float(last.close)}
+
+
+def verdict_card(sym: str, name: str, a: dict) -> None:
+    title, sub, edge, bg, ink = LEVELS[a["level"]]
+    st.markdown(
+        f'<div style="background:{bg};border:1px solid {edge};border-left:6px solid {edge};border-radius:10px;'
+        f'padding:16px 20px;margin:.3rem 0 1rem">'
+        f'<div style="color:{ink};font-size:.8rem;font-weight:600;letter-spacing:.04em">{escape(sym)} · {escape(name)}</div>'
+        f'<div style="color:{ink};font-size:1.6rem;font-weight:700;line-height:1.3">{title}</div>'
+        f'<div style="color:{ink};font-size:.92rem">{sub}</div>'
+        f'<div style="color:{ink};opacity:.75;font-size:.78rem;margin-top:6px">Based on NSE data up to '
+        f'{a["as_of"]:%d %b %Y} (updated each trading day after 7:30 PM). Not investment advice.</div></div>',
+        unsafe_allow_html=True)
+
+
+def checklist(checks: list) -> None:
+    rows = []
+    for kind, title, detail in checks:
+        mark, color = MARK[kind]
+        rows.append(f'<div style="display:flex;gap:12px;padding:10px 0;border-bottom:1px solid rgba(11,11,11,.08)">'
+                    f'<div style="flex:0 0 26px;height:26px;border-radius:50%;background:{color};color:#fff;'
+                    f'font-weight:700;display:flex;align-items:center;justify-content:center">{mark}</div>'
+                    f'<div><div style="font-weight:600;color:{INK}">{escape(title)}</div>'
+                    f'<div style="color:{INK2};font-size:.88rem">{escape(detail)}</div></div></div>')
+    st.markdown("".join(rows), unsafe_allow_html=True)
+
+
+def check_view(sym: str, key: str) -> None:
+    a = assess(sym)
+    if a["level"] is None:
+        st.info("No price history for this stock.")
+        return
+    name = q("select max(company_name) as n from gold.dim_stock where symbol = ?", (sym,)).n.iloc[0] or ""
+    verdict_card(sym, name, a)
+    left, right = st.columns([5, 6], gap="large")
+    with left:
+        st.markdown("### What we checked")
+        checklist(a["checks"])
+        stats = outcome_stats().set_index("risk_band")
+        if a["band"] in stats.index:
+            r = stats.loc[a["band"]]
+            st.markdown(f'<div class="card" style="margin-top:12px"><span class="nm">What happened after similar alerts</span>'
+                        f'<div class="why">After {int(r.n)} past {a["band"].lower()}-risk alerts, the stock was on average '
+                        f'<b>{r.avg_ret:+.1f}%</b> five trading days later, and <b>{r.pct_down:.0f}%</b> of them fell. '
+                        f'A few weeks of history: a pattern, not a prediction.</div></div>', unsafe_allow_html=True)
+    with right:
+        pxd = q("""select trade_date, open, high, low, close, volume, deliv_pct, return_pct, volume_ratio_20d
+                   from gold.fact_stock_daily where symbol = ? order by trade_date""", (sym,))
+        al = q("select * from gold.fact_surveillance_alert where symbol = ? order by trade_date", (sym,))
+        last = pxd.iloc[-1]
+        tiles(tile("Last close", f"₹{last.close:,.2f}", f"{last.return_pct:+.1f}% on {last.trade_date:%d %b}",
+                   "ok" if last.return_pct > 0 else "bad"),
+              tile("Volume", f"{last.volume_ratio_20d:.1f}x" if pd.notna(last.volume_ratio_20d) else "n/a", "of its usual"))
+        st.plotly_chart(price_chart(pxd, al, height=360), width="stretch", config=NOBAR, key=f"cpx_{key}", theme=None)
+        st.markdown('<div class="note">Triangles mark days our engine flagged. Hover for the numbers.</div>', unsafe_allow_html=True)
+    with st.expander("Technical detail: why each alert fired, the score, filings and paper invest"):
+        stock_detail(sym, key=f"tech_{key}", compact=True)
+
+
+@st.dialog("Stock check", width="large")
 def stock_dialog(sym: str, on: date | None = None) -> None:
-    stock_detail(sym, on, key="dlg")
+    check_view(sym, key="dlg")
+
+
+# ---------- pages: the three questions a user asks ----------
+
+def page_check() -> None:
+    names = q("""select f.symbol, max(d.company_name) as company_name from gold.fact_stock_daily f
+                 join gold.dim_stock d using (stock_sk) group by 1 order by 1""")
+    label = dict(zip(names.symbol, names.company_name))
+    st.title("Check a stock before you buy")
+    st.markdown('<div class="sub">Search any NSE stock. We check it for the warning signs of a pump-and-dump: '
+                'unusual trading, moves without news, NSE queries and NSE surveillance lists.</div>', unsafe_allow_html=True)
+    sym = st.selectbox("Stock", names.symbol.tolist(), index=None, placeholder="Search by symbol or company name…",
+                       format_func=lambda s: f"{s} · {label.get(s) or ''}", label_visibility="collapsed", key="check_sym")
+    risky = alerts_on(alert_days()[0]).query("risk_band == 'HIGH'").symbol.head(3).tolist()
+    examples = risky + [s for s in ("TRENT", "RELIANCE") if s in label]
+    pick = st.pills("Or try", examples, key="check_pick",
+                    format_func=lambda s: f"{s}{' · flagged today' if s in risky else ''}")
+    chosen = sym or pick or st.query_params.get("stock")
+    if chosen in label:
+        st.query_params["stock"] = chosen  # shareable link to this check
+    else:
+        chosen = None
+    if not chosen:
+        st.markdown('<div class="card" style="margin-top:1rem"><span class="nm">How to read the result</span><div class="why">'
+                    '<b style="color:#a32d2d">High caution</b>: a strong warning sign fired, such as an NSE surveillance '
+                    'list, an NSE query or a high-risk move with no news. <b style="color:#854f0b">Some warning signs</b>: '
+                    'worth understanding first, e.g. thinly traded or a fast run-up. <b style="color:#3b6d11">No warning '
+                    'signs</b>: none of the checks fired, which is not a recommendation to buy.</div></div>', unsafe_allow_html=True)
+        return
+    check_view(chosen, key="page")
+
+
+def resolve(tokens: list[str], names: pd.DataFrame) -> tuple[list[str], list[str], dict[str, str]]:
+    """Match what the user typed to NSE symbols: symbol first, then the best company-name match
+    (exact name > starts with > whole word), ties going to the most traded stock."""
+    syms = set(names.symbol)
+    rows = list(zip(names.symbol, names.company_name.fillna("").str.upper(), names.turnover.fillna(0)))
+    found, missing, by_name = [], [], {}
+    for raw in tokens:
+        t = raw.strip().upper().removesuffix(".NS")
+        if not t:
+            continue
+        if t in syms:
+            found.append(t)
+            continue
+        word = re.escape(t)
+        best = None
+        for sym, name, turnover in rows:
+            base = re.sub(r"\s+(LIMITED|LTD\.?)$", "", name).strip()
+            rank = (0 if base == t else 1 if re.match(rf"{word}", name) else
+                    2 if re.search(rf"{word}", name) else None)
+            if rank is not None and (best is None or (rank, -turnover) < best[:2]):
+                best = (rank, -turnover, sym)
+        if best:
+            found.append(best[2])
+            by_name[raw.strip()] = best[2]
+        else:
+            missing.append(raw.strip())
+    return list(dict.fromkeys(found)), missing, by_name
+
+
+def page_mine() -> None:
+    names = q("""select f.symbol, max(d.company_name) as company_name, avg(f.turnover_lacs) as turnover
+                 from gold.fact_stock_daily f join gold.dim_stock d using (stock_sk) group by 1""")
+    st.title("Are my stocks safe?")
+    st.markdown('<div class="sub">Add the stocks you hold or plan to buy. We run the same checks on each one and show '
+                'the riskiest first. Your list stays on this computer.</div>', unsafe_allow_html=True)
+    if "mine_text" not in st.session_state:
+        st.session_state.mine_text = ", ".join(json.loads(MY.read_text(encoding="utf-8")) if MY.exists() else [])
+
+    def use_sample() -> None:
+        sample = pd.read_csv(ROOT / "data" / "sample" / "portfolio.csv").query("asset_class == 'STOCK'")
+        st.session_state.mine_text = ", ".join(sample.symbol.unique())
+
+    c1, c2 = st.columns([3, 2], gap="medium")
+    text = c1.text_area("Symbols or company names, separated by commas or new lines", key="mine_text", height=96,
+                        placeholder="e.g. RELIANCE, TCS, Infosys, TERAI")
+    up = c2.file_uploader("…or upload a holdings CSV (e.g. exported from your broker)", type=["csv"])
+    b1, b2, _ = st.columns([1, 1, 3])
+    b1.button("Check my stocks", type="primary", width="stretch")
+    b2.button("Try a sample portfolio", width="stretch", on_click=use_sample)
+    tokens = text.replace("\n", ",").split(",")
+    if up is not None:
+        df = pd.read_csv(up)
+        col = next((c for c in df.columns if any(k in c.lower() for k in ("symbol", "instrument", "stock", "scrip", "name"))),
+                   df.columns[0])
+        tokens += df[col].astype(str).tolist()
+    found, missing, by_name = resolve(tokens, names)
+    if found:
+        MY.parent.mkdir(parents=True, exist_ok=True)
+        MY.write_text(json.dumps(found), encoding="utf-8")
+    company = dict(zip(names.symbol, names.company_name))
+    if by_name:
+        st.caption("Matched by name: " + "; ".join(f"{k} → {v} ({company.get(v) or ''})" for k, v in by_name.items()))
+    if missing:
+        st.caption("Not found among the NSE equities loaded: " + ", ".join(missing[:12]))
+    if not found:
+        st.info("Add a few stocks above, or try the sample portfolio.")
+        return
+    rows = []
+    for s in found:
+        a = assess(s)
+        if a["level"] is None:
+            continue
+        worst = a["checks"][0]
+        rows.append({"symbol": s, "company": company.get(s) or "",
+                     "verdict": {"red": "🔴 High caution", "amber": "🟡 Some warning signs", "green": "🟢 No warning signs"}[a["level"]],
+                     "rank": {"red": 0, "amber": 1, "green": 2}[a["level"]],
+                     "main_reason": worst[1] if worst[0] != "ok" else "—", "close": a["close"]})
+    res = pd.DataFrame(rows).sort_values(["rank", "symbol"]).reset_index(drop=True)
+    n = res["rank"].value_counts()
+    tiles(tile("Stocks checked", str(len(res)), f"data up to {lookback_start(1):%d %b}"),
+          tile("High caution", str(n.get(0, 0)), "strong warning signs", "bad" if n.get(0, 0) else ""),
+          tile("Some warning signs", str(n.get(1, 0)), "worth a closer look"),
+          tile("No warning signs", str(n.get(2, 0)), "none of the checks fired", "ok" if n.get(2, 0) else ""))
+    ev = st.dataframe(res[["symbol", "company", "verdict", "main_reason", "close"]], hide_index=True, width="stretch",
+                      on_select="rerun", selection_mode="single-row", key="mine_tbl", column_config={
+                          "symbol": "Symbol", "company": "Company", "verdict": "Verdict",
+                          "main_reason": "Main reason", "close": st.column_config.NumberColumn("Last close", format="₹%.2f")})
+    st.markdown('<div class="note">Click a row to see every check for that stock.</div>', unsafe_allow_html=True)
+    sym = picked(ev, res, "mine_tbl")
+    if sym:
+        stock_dialog(sym)
 
 
 # ---------- pages ----------
@@ -303,12 +607,13 @@ def market_map(al: pd.DataFrame) -> go.Figure:
 def page_overview() -> None:
     days = alert_days()
     top = st.columns([3, 1])
-    top[0].title("Market surveillance")
+    top[0].title("Risky today")
     d = top[1].selectbox("Trading day", days, format_func=lambda x: x.strftime("%a %d %b %Y"), label_visibility="collapsed")
     al = alerts_on(d)
     prev = alerts_on(days[days.index(d) + 1]) if days.index(d) + 1 < len(days) else None
     high = al[al.risk_band == "HIGH"]
-    st.markdown(f'<div class="sub">{d:%A %d %B %Y} · every NSE stock scored against 7 rules after the close</div>',
+    st.markdown(f'<div class="sub">{d:%A %d %B %Y} · stocks that moved on unusual volume. The red ones are the most '
+                f'suspicious; most moved with no company news behind them. Think twice before chasing them.</div>',
                 unsafe_allow_html=True)
     delta = f"{len(al) - len(prev):+d} vs previous day" if prev is not None else ""
     unexplained = int(high.news_types.isna().sum())
@@ -372,24 +677,8 @@ def page_overview() -> None:
         stock_dialog(opened, d)
 
 
-def page_stock() -> None:
-    names = q("""select f.symbol, max(d.company_name) as company_name from gold.fact_stock_daily f
-                 join gold.dim_stock d using (stock_sk) group by 1 order by 1""")
-    label = dict(zip(names.symbol, names.company_name))
-    symbols = names.symbol.tolist()
-    top = st.columns([3, 2])
-    top[0].title("Stock explorer")
-    default = st.session_state.get("symbol", "TRENT")
-    sym = top[1].selectbox("Stock", symbols, index=symbols.index(default) if default in symbols else 0,
-                           format_func=lambda s: f"{s} · {label.get(s) or ''}", label_visibility="collapsed")
-    st.session_state["symbol"] = sym
-    st.markdown('<div class="sub">Search any of the stocks loaded: price, volume, every alert and the filings behind it</div>',
-                unsafe_allow_html=True)
-    stock_detail(sym, key="page")
-
-
 def page_after() -> None:
-    st.title("What happened after an alert?")
+    st.title("Track record: what happened after an alert?")
     st.markdown('<div class="sub">Buy at the next day\'s open (an alert is only known after the close) and sell at the '
                 'close N trading days later, against doing the same in the median stock.</div>', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
@@ -470,7 +759,7 @@ def page_paper() -> None:
     st.markdown(f'<div class="sub">{DISCLAIMER}</div>', unsafe_allow_html=True)
     rows = load_paper()
     if not rows:
-        st.info("Nothing yet. Open any stock and use the 'Paper invest' tab.")
+        st.info("Nothing yet. Check a stock, open 'Technical detail' under the verdict and use the 'Paper invest' tab.")
         return
     df = pd.DataFrame(rows)
     latest = q("""select symbol, close as last_close, trade_date as as_of from gold.fact_stock_daily
@@ -616,14 +905,19 @@ def page_health() -> None:
                      "duration_s": st.column_config.NumberColumn("Seconds", format="%.0f"), "detail": "Detail"})
 
 
-nav = st.navigation([
-    st.Page(page_overview, title="Overview", icon=":material/radar:", url_path="overview", default=True),
-    st.Page(page_stock, title="Stock explorer", icon=":material/candlestick_chart:", url_path="stock"),
-    st.Page(page_after, title="After the alert", icon=":material/timeline:", url_path="after"),
-    st.Page(page_paper, title="Paper portfolio", icon=":material/account_balance_wallet:", url_path="paper"),
-    st.Page(page_validation, title="Does it work", icon=":material/verified:", url_path="validation"),
-    st.Page(page_health, title="Pipeline health", icon=":material/monitor_heart:", url_path="health"),
-], position="top")
+nav = st.navigation({
+    "": [
+        st.Page(page_check, title="Check a stock", icon=":material/verified_user:", url_path="check", default=True),
+        st.Page(page_mine, title="My stocks", icon=":material/account_balance_wallet:", url_path="mine"),
+        st.Page(page_overview, title="Risky today", icon=":material/warning:", url_path="today"),
+    ],
+    "How it works": [
+        st.Page(page_after, title="Track record", icon=":material/timeline:", url_path="track-record"),
+        st.Page(page_validation, title="Does it match NSE?", icon=":material/fact_check:", url_path="validation"),
+        st.Page(page_health, title="Pipeline health", icon=":material/monitor_heart:", url_path="health"),
+        st.Page(page_paper, title="Paper portfolio", icon=":material/savings:", url_path="paper"),
+    ],
+}, position="top")
 try:
     nav.run()
 except duckdb.IOException:

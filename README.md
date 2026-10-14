@@ -1,7 +1,19 @@
 # India Market Intelligence and Surveillance Platform
 
-A daily data pipeline on **real Indian market data** that flags unusual trading in NSE stocks,
-explains each flag with company news, and checks its own alerts against what NSE itself acted on.
+**A pump-and-dump warning system for Indian retail investors.** Trading apps show a small stock
+up 20% in green with a Buy button. This project tells you what they don't: that the jump came on
+40x normal volume, with no company news behind it, that NSE has asked the company to explain it,
+and what usually happened next to stocks that looked like this.
+
+Search any NSE stock, or paste your holdings, and get a plain-language verdict built from a daily
+data pipeline on real NSE data:
+
+![Check a stock](docs/img/check_a_stock.png)
+
+Under the hood it is a full data-engineering project: daily ingestion of NSE and AMFI files, a
+Bronze / Silver / Gold lakehouse (PySpark + Delta, dbt on DuckDB), a 7-rule surveillance engine,
+LLM triage of the company filings behind each alert, a Telegram digest, and a validation layer that
+checks the alerts against what NSE itself acted on.
 
 **The result:** over 15 trading days and 3,436 stocks, HIGH-risk alerts were **9x more likely than
 an average stock to be on NSE's short-term surveillance list**, and the engine flagged **93% of the
@@ -155,33 +167,31 @@ Optional keys in `.env`: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for the diges
 Use your own portfolio without committing it: put it in `data/local/portfolio.csv` and set
 `PORTFOLIO_CSV=data/local/portfolio.csv`.
 
-## Dashboard
+## Dashboard: the product
 
 ```bat
 powershell -ExecutionPolicy Bypass -File scripts\dashboard.ps1     :: opens http://localhost:8501
 ```
 
-A Streamlit app on the Gold tables. Hover any dot or bar for its details; click a dot or a table
-row to open that stock. It is read-only and never holds the warehouse open, so the daily run is
-not blocked.
+Three screens answer the three questions an investor actually has:
+
+| Screen | Question | What you get |
+|---|---|---|
+| **Check a stock** | "Should I be worried about this one?" | A verdict (High caution / Some warning signs / No warning signs) and the checks behind it: NSE surveillance lists, recent alerts, whether news explains the move, NSE queries, liquidity, delivery, run-up, plus what happened after similar alerts. Each check has its own link (`?stock=SYMBOL`). |
+| **My stocks** | "Are any of my holdings risky?" | Paste symbols or company names, or upload a broker's holdings CSV; every stock is checked and the riskiest come first. The list stays on the machine. |
+| **Risky today** | "What should I not chase today?" | A market map of the day's unusual movers (hover for details, click to open), with the high-risk ones and their news check. |
+
+**How it works** holds the engineering: the track record of past alerts, the comparison with NSE,
+pipeline health, and a paper portfolio with virtual money.
 
 ![Validation page](docs/img/dashboard_validation.png)
 
-| Page | What it shows |
-|---|---|
-| Overview | A market map of every flagged stock (price move against volume, sized by score), the high-risk alerts with their news check, and a filterable table |
-| Stock detail | Candlesticks and volume with alert days marked, why it was flagged, **the score broken down by rule**, the filings, and a paper-invest button |
-| After the alert | Simulate buying the day after every alert and holding N days, against the median stock |
-| Paper portfolio | Virtual positions and their profit or loss |
-| Does it work | The comparison with NSE's queries and surveillance list, and who was first |
-| Pipeline health | Data freshness, step timings, run log and data-quality checks |
+The verdict is deliberately conservative in what it claims: it flags patterns, it cannot prove
+manipulation, the data is end-of-day, and "no warning signs" is not a recommendation to buy.
 
-![Stock detail](docs/img/dashboard_stock.png)
-
-"After the alert" is the engine's most direct check: over 21 Sep - 12 Oct, a stock bought at the
-open after a HIGH alert was **down 10.9% on average five trading days later**, and only 17% of them
-rose (24 alerts). That is what a pump-and-dump screen should find, on a small sample. The paper
-portfolio and the simulator use virtual money on past data; nothing here is investment advice.
+Over 21 Sep - 12 Oct, a stock bought at the open after a HIGH alert was **down 10.9% on average
+five trading days later**, and only 17% of them rose (24 alerts): what a pump-and-dump screen
+should find, on a small sample. Nothing here is investment advice.
 
 ## Data model
 
